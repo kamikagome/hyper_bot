@@ -1,0 +1,16 @@
+[Unit]
+Description=Hyperliquid Market Making Bot
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/hyper_bot
+EnvironmentFile=/opt/hyper_bot/.env
+ExecStart=/opt/hyper_bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
