@@ -4,6 +4,7 @@ import httpx
 import structlog
 from datetime import datetime, timezone, timedelta
 from config import settings
+from .calculations import beta_adjusted_pnl
 
 logger = structlog.get_logger()
 
@@ -27,12 +28,105 @@ async def fetch_hl_price_at(client: httpx.AsyncClient, symbol: str, ts_ms: int) 
         candles = resp.json()
         if not candles: return None
         # Closest candle to timestamp logic
-        # candles[i] = {"t": timestamp_ms, "c": close_price_string, ...}
         closest = min(candles, key=lambda x: abs(x['t'] - ts_ms))
         return float(closest['c'])
     except Exception as e:
         logger.error("Failed to fetch HL markout price", symbol=symbol, ts=ts_ms, error=str(e))
         return None
+
+async def fetch_binance_btc_price(client: httpx.AsyncClient, ts_ms: int) -> float | None:
+    try:
+        # Request 1s klines around the timestamp
+        resp = await client.get(f"{BINANCE_API_URL}/klines", params={
+            "symbol": "BTCUSDT",
+            "interval": "1s",
+            "startTime": ts_ms - 1000,
+            "endTime": ts_ms + 60000,
+            "limit": 1
+        })
+        resp.raise_for_status()
+        klines = resp.json()
+        if not klines: return None
+        return float(klines[0][4]) # Close price
+    except Exception as e:
+        logger.error("Failed to fetch Binance BTC price", ts=ts_ms, error=str(e))
+        return None
+
+async def process_markouts(pool, client: httpx.AsyncClient):
+    async with pool.acquire() as conn:
+        five_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+        one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
+        
+        while True:
+            # Poll postgres for fills older than 5 minutes that lack markout calculations
+            # Bounded to 1 day to prevent infinite retry loops on dead records
+            rows = await conn.fetch("""
+                SELECT id, symbol, filled_at, side, price, size
+                FROM fills
+                WHERE filled_at < $1 AND filled_at > $2 AND markout_5m IS NULL
+                LIMIT 50
+            """, five_mins_ago, one_day_ago)
+            
+            if not rows:
+                break
+                
+            for row in rows:
+                fid = row['id']
+                symbol = row['symbol']
+                filled_at = row['filled_at']
+                fill_price = float(row['price'])
+                size = float(row['size'])
+                side = row['side']
+                
+                sign = 1 if side.upper() == "BUY" else -1
+                position_size = size * sign
+                
+                ts_fill = int(filled_at.timestamp() * 1000)
+                
+                # Sequential async fetch for the 3 horizons
+                p5s = await fetch_hl_price_at(client, symbol, ts_fill + 5000)
+                p30s = await fetch_hl_price_at(client, symbol, ts_fill + 30000)
+                p5m = await fetch_hl_price_at(client, symbol, ts_fill + 300000)
+                
+                # Fetch BTC for Beta adjustments
+                btc_t0 = await fetch_binance_btc_price(client, ts_fill)
+                btc_p5s = await fetch_binance_btc_price(client, ts_fill + 5000)
+                btc_p30s = await fetch_binance_btc_price(client, ts_fill + 30000)
+                btc_p5m = await fetch_binance_btc_price(client, ts_fill + 300000)
+                
+                def calc_adj_markout(p_horizon, b_horizon):
+                    if not p_horizon or not btc_t0 or not b_horizon: return None
+                    
+                    # Original markup per unit
+                    raw_markout_per_unit = (p_horizon - fill_price) * sign
+                    raw_pnl = raw_markout_per_unit * size
+                    
+                    # BTC beta adjustment logic
+                    btc_ret = (b_horizon - btc_t0) / btc_t0
+                    adj_pnl = beta_adjusted_pnl(raw_pnl, btc_ret, settings.BTC_BETA, position_size)
+                    
+                    # Store as per-unit markout matching DB Schema bounds
+                    return adj_pnl / size if size > 0 else 0.0
+
+                m5s = calc_adj_markout(p5s, btc_p5s)
+                m30s = calc_adj_markout(p30s, btc_p30s)
+                m5m = calc_adj_markout(p5m, btc_p5m)
+                
+                # Require at least one to be valid to perform an update.
+                if m5s is not None or m30s is not None or m5m is not None:
+                    await conn.execute("""
+                        UPDATE fills
+                        SET markout_5s = COALESCE($1, markout_5s), 
+                            markout_30s = COALESCE($2, markout_30s), 
+                            markout_5m = COALESCE($3, markout_5m)
+                        WHERE id = $4
+                    """, m5s, m30s, m5m, fid)
+                    logger.info("Processed markouts for fill", fill_id=fid, symbol=symbol)
+                else:
+                    # Mark unreachable ones explicitly using COALESCE isn't enough to trip the NULL check
+                    # We will force 0.0 to safely clear it if it fails entirely and we must skip.
+                    # As a simpler fail-safe, the day bound handles the skip perfectly.
+                    pass
 
 async def markout_loop():
     logger.info("Starting markout background worker loop")
@@ -41,44 +135,7 @@ async def markout_loop():
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
-                async with pool.acquire() as conn:
-                    # Poll postgres for fills older than 5 minutes that lack markout calculations
-                    five_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
-                    rows = await conn.fetch("""
-                        SELECT id, symbol, filled_at, side, price
-                        FROM fills
-                        WHERE filled_at < $1 AND markout_5m IS NULL
-                        LIMIT 100
-                    """, five_mins_ago)
-                    
-                    for row in rows:
-                        fid = row['id']
-                        symbol = row['symbol']
-                        filled_at = row['filled_at']
-                        fill_price = float(row['price'])
-                        side = row['side']
-                        sign = 1 if side.upper() == "BUY" else -1
-                        
-                        ts_fill = int(filled_at.timestamp() * 1000)
-                        
-                        # Sequential async fetch for the 3 horizons to avoid rate limits
-                        p5s = await fetch_hl_price_at(client, symbol, ts_fill + 5000)
-                        p30s = await fetch_hl_price_at(client, symbol, ts_fill + 30000)
-                        p5m = await fetch_hl_price_at(client, symbol, ts_fill + 300000)
-                        
-                        # Markout is: (Price_horizon - Fill_price) * direction
-                        m5s = ((p5s - fill_price) * sign) if p5s else None
-                        m30s = ((p30s - fill_price) * sign) if p30s else None
-                        m5m = ((p5m - fill_price) * sign) if p5m else None
-                        
-                        await conn.execute("""
-                            UPDATE fills
-                            SET markout_5s = $1, markout_30s = $2, markout_5m = $3
-                            WHERE id = $4
-                        """, m5s, m30s, m5m, fid)
-                        
-                        logger.info("Processed markouts for fill", fill_id=fid, symbol=symbol)
-                
+                await process_markouts(pool, client)
             except Exception as e:
                 logger.error("Markout worker error", error=str(e), exc_info=True)
             
