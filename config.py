@@ -10,13 +10,13 @@ class Config(BaseSettings):
     ENV: str = "production"
     
     # Database / Redis
-    POSTGRES_URL: str = "postgresql+asyncpg://bot_user:bot_password@localhost:5432/bot_db"
+    POSTGRES_URL: str = "postgresql://bot_user:bot_password@localhost:5432/bot_db"
     REDIS_URL: str = "redis://localhost:6379/0"
     
     # Risk Limits
     MAX_LOSS_USD: float = 50.0  # $50 max loss
     MAX_POSITION_USD: float = 50.0 # $50 max notional initially
-    MAX_ORDER_SIZE: float = 10.0 # max size per child order
+    MAX_ORDER_SIZE: float = 50.0 # max size per child order
     
     # Trading params
     SYMBOL: str = "ETH"

@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS orders (
     binance_mid_at_placement DECIMAL(18, 8),
     hl_mid_at_placement DECIMAL(18, 8),
     ewma_spread_at_placement DECIMAL(18, 8),
-    cancelled_at TIMESTAMP WITH TIME ZONE
+    cancelled_at TIMESTAMP WITH TIME ZONE,
+    tick_to_trade_ns BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS fills (
