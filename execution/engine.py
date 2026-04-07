@@ -29,6 +29,7 @@ class ExecutionEngine:
         self.hl_mid = None
         self.active_order_id = None
         self.active_order_price = None
+        self.active_order_is_buy = None
         self.api_failures = 0
         
         account: Account = Account.from_key(settings.HL_SECRET_KEY)
@@ -91,6 +92,7 @@ class ExecutionEngine:
         logger.info("Order cancelled", order_id=self.active_order_id, ttt_ms=ttt_ns / 1_000_000)
         self.active_order_id = None
         self.active_order_price = None
+        self.active_order_is_buy = None
 
     async def _drain_queues(self):
         while not self.hl_queue.empty():
@@ -107,6 +109,7 @@ class ExecutionEngine:
             if self.active_order_id and str(fill_evt.get("oid")) == str(self.active_order_id):
                 self.active_order_id = None # Cleared by fill
                 self.active_order_price = None
+                self.active_order_is_buy = None
 
     async def run(self):
         await self.reconcile_state()
@@ -142,11 +145,21 @@ class ExecutionEngine:
                 theoretical_hl_price = b_mid - self.ewma_spread
                 
                 if self.active_order_id:
-                    # Cancel constraint "moves beyond configurable threshold"
-                    if abs(theoretical_hl_price - self.active_order_price) > settings.SPREAD_CANCEL_THRESHOLD:
+                    cancel_needed = False
+                    if not child_szs:
+                        cancel_needed = True # Target reached or zeroed
+                    else:
+                        req_sz = child_szs[0]
+                        direction_matches = (req_sz > 0) == self.active_order_is_buy
+                        if not direction_matches:
+                            cancel_needed = True
+                        elif abs(theoretical_hl_price - self.active_order_price) > settings.SPREAD_CANCEL_THRESHOLD:
+                            cancel_needed = True
+                            
+                    if cancel_needed:
                         await self.cancel_active_order(recv_ns)
                         
-                elif child_szs:
+                if not self.active_order_id and child_szs:
                     req_sz = child_szs[0]
                     is_buy = req_sz > 0
                     sz_abs = abs(req_sz)
@@ -165,6 +178,8 @@ class ExecutionEngine:
                             self.active_order_id = statuses[0]["resting"]["oid"]
                             
                         self.active_order_price = px
+                        self.active_order_is_buy = is_buy
+                        
                         await self.metrics_queue.put({
                             "type": "order_placed",
                             "order_id": str(self.active_order_id),
