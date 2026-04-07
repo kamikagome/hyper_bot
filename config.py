@@ -26,5 +26,5 @@ class Config(BaseSettings):
     
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
-# To instantiate, users should have their .env setup.
-# settings = Config()
+# Instantiate the settings so it can be imported
+settings = Config()
