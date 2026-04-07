@@ -116,5 +116,7 @@ The dashboard is accessible at `http://YOUR_SERVER_IP:8080`. It provides real-ti
 *   **Latency:** p99 Tick-to-Trade < 5ms (from Tokyo).
 *   **Stability:** 99.9% uptime with zero unreconciled drift events.
 
+The original article: https://stalequant.com/essays/index.html#bots
+
 ---
 *Disclaimer: Trading cryptocurrencies involves significant risk. This bot is provided for educational and research purposes. Use at your own risk.*
