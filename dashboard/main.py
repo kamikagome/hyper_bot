@@ -5,7 +5,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nicegui import ui
-from app import DashboardApp
+from dashboard.app import DashboardApp
 
 def start_dashboard():
     dashboard = DashboardApp()
