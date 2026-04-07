@@ -1,0 +1,10 @@
+websockets
+hyperliquid-python-sdk
+pydantic-settings
+redis
+asyncpg
+structlog
+nicegui
+httpx
+eth-account
+python-dotenv
